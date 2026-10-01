@@ -9,6 +9,10 @@ interface Props {
 export function HistoryScreen({ onBack, onReadAloud }: Props) {
   const [items, setItems] = useState<HistoryItem[]>(HistoryService.getItems());
   const [showClear, setShowClear] = useState(false);
+  const [query, setQuery] = useState('');
+
+  const q = query.trim().toLowerCase();
+  const filtered = q ? items.filter((i) => i.text.toLowerCase().includes(q)) : items;
 
   const handleDelete = (id: number) => {
     HistoryService.deleteItem(id);
@@ -40,8 +44,20 @@ export function HistoryScreen({ onBack, onReadAloud }: Props) {
           <p className="history-empty-sub">Read text and tap Save to keep it here</p>
         </div>
       ) : (
-        <div className="history-list">
-          {items.map((item) => (
+        <>
+          <div className="history-search">
+            <input
+              type="search"
+              placeholder="Search saved texts…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+          <div className="history-list">
+            {filtered.length === 0 ? (
+              <p className="history-no-match">No saved texts match “{query.trim()}”</p>
+            ) : (
+              filtered.map((item) => (
             <div
               key={item.id}
               className="history-card"
@@ -64,8 +80,10 @@ export function HistoryScreen({ onBack, onReadAloud }: Props) {
               <p className="history-text">{item.text}</p>
               <p className="history-meta">{item.blockCount} text areas • Tap to read aloud</p>
             </div>
-          ))}
-        </div>
+              ))
+            )}
+          </div>
+        </>
       )}
 
       {showClear && (

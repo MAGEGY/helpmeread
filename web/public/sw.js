@@ -1,7 +1,9 @@
 // Service worker — offline app shell + installable PWA.
 // Strategy: network-first for HTML (new deploys show immediately),
 // cache-first for hashed assets (immutable filenames, safe to cache).
-const CACHE = 'hmr-v2';
+const CACHE = 'hmr-v3';
+const OCR_CACHE = 'hmr-ocr-v1';
+const OCR_HOST = 'cdn.jsdelivr.net'; // Tesseract worker + WASM core + traineddata
 const CORE = ['./', './index.html', './manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -21,7 +23,29 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  // Only handle same-origin; OCR models / translation go straight to network
+
+  // Tesseract OCR assets (worker script, WASM core, traineddata):
+  // cache-first so recognition keeps working offline after first use
+  if (url.hostname === OCR_HOST) {
+    e.respondWith(
+      caches.open(OCR_CACHE).then((c) =>
+        c.match(e.request).then(
+          (hit) =>
+            hit ||
+            fetch(e.request).then((res) => {
+              if (res.ok) {
+                const copy = res.clone();
+                c.put(e.request, copy);
+              }
+              return res;
+            })
+        )
+      )
+    );
+    return;
+  }
+
+  // Only handle same-origin; translation goes straight to network
   if (url.origin !== location.origin) return;
 
   // Navigations & HTML: network-first, cached shell only as offline fallback

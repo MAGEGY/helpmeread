@@ -33,6 +33,63 @@ function getWorker(tessCodes: string[]): Promise<Tesseract.Worker> {
   return w;
 }
 
+/** Normalize a string URL into a loaded image element. */
+async function toSource(
+  image: HTMLImageElement | HTMLCanvasElement | string
+): Promise<{ src: CanvasImageSource; w: number; h: number }> {
+  if (typeof image === 'string') {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Unsupported image format'));
+      el.src = image;
+    });
+    return { src: img, w: img.naturalWidth, h: img.naturalHeight };
+  }
+  return {
+    src: image,
+    w:
+      (image as HTMLImageElement).naturalWidth ??
+      (image as HTMLCanvasElement).width,
+    h:
+      (image as HTMLImageElement).naturalHeight ??
+      (image as HTMLCanvasElement).height,
+  };
+}
+
+/** Grayscale + min-max contrast stretch — noticeably improves Tesseract
+ * accuracy on dim/low-contrast phone photos. Returns a new canvas; the
+ * original image is untouched. */
+function preprocess(src: CanvasImageSource, w: number, h: number): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d')!;
+  ctx.drawImage(src, 0, 0, w, h);
+  try {
+    const img = ctx.getImageData(0, 0, w, h);
+    const d = img.data;
+    const gray = new Uint8ClampedArray(w * h);
+    let min = 255;
+    let max = 0;
+    for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
+      const g = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0;
+      gray[p] = g;
+      if (g < min) min = g;
+      if (g > max) max = g;
+    }
+    const range = Math.max(1, max - min);
+    for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
+      const v = (((gray[p] - min) * 255) / range) | 0;
+      d[i] = d[i + 1] = d[i + 2] = v;
+    }
+    ctx.putImageData(img, 0, 0);
+  } catch {
+    // Tainted canvas (cross-origin source) — use the unprocessed image
+  }
+  return c;
+}
+
 /**
  * Run OCR on an image using Tesseract.js.
  * Downloads language models on first use (cached by the browser and reused
@@ -48,16 +105,10 @@ export async function recognizeText(
 ): Promise<OcrResult> {
   const langs = Array.from(new Set([language.tessCode, 'eng']));
   const worker = await getWorker(langs);
-  const { data } = await worker.recognize(image);
-
-  const width =
-    (image as HTMLImageElement).naturalWidth ??
-    (image as HTMLCanvasElement).width ??
-    0;
-  const height =
-    (image as HTMLImageElement).naturalHeight ??
-    (image as HTMLCanvasElement).height ??
-    0;
+  const { src, w, h } = await toSource(image);
+  const { data } = await worker.recognize(
+    w > 0 && h > 0 ? preprocess(src, w, h) : src
+  );
 
   const toBlocks = (items: any[] | null | undefined): OcrBlock[] =>
     (items ?? [])
@@ -91,11 +142,11 @@ export async function recognizeText(
     blocks = [
       {
         text,
-        bbox: { x0: 0, y0: 0, x1: width, y1: height },
+        bbox: { x0: 0, y0: 0, x1: w, y1: h },
         confidence: (data as any).confidence ?? 0,
       },
     ];
   }
 
-  return { text, blocks, width, height };
+  return { text, blocks, width: w, height: h };
 }
