@@ -116,9 +116,9 @@ export function ResultScreen({
           break;
       }
     };
-    voiceCmd.start(handler);
+    voiceCmd.start(handler, selectedLanguage.ttsLocale);
     return () => voiceCmd.stop();
-  }, [isListening, blocks, isSaved]);
+  }, [isListening, blocks, isSaved, selectedLanguage]);
 
   // Handle tap on overlay
   const handleImageClick = (e: React.MouseEvent<HTMLImageElement>) => {

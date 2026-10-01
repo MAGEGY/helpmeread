@@ -35,6 +35,7 @@ export function CameraScreen({
   const [showSettings, setShowSettings] = useState(false);
   const [flashOn, setFlashOn] = useState(false);
   const [camError, setCamError] = useState<string | null>(null);
+  const [flashSupported, setFlashSupported] = useState<boolean | null>(null);
 
   // Live camera viewfinder (getUserMedia). Falls back to upload when the
   // camera is unavailable or permission is denied.
@@ -57,6 +58,9 @@ export function CameraScreen({
           v.srcObject = stream;
           v.onloadedmetadata = () => v.play().catch(() => {});
         }
+        // Real torch only where the device reports the capability
+        const caps = (stream.getVideoTracks()[0] as any)?.getCapabilities?.();
+        setFlashSupported(!!caps?.torch);
       })
       .catch((err: any) => {
         if (cancelled) return;
@@ -97,12 +101,12 @@ export function CameraScreen({
   const toggleFlash = () => {
     const track = streamRef.current?.getVideoTracks()[0];
     const next = !flashOn;
-    // Real torch where supported; otherwise keep the visual toggle only
+    // No-op when the device has no torch — the button is disabled in that case
+    if (!track || flashSupported === false) return;
     (track as any)
-      ?.applyConstraints?.({ advanced: [{ torch: next }] })
+      .applyConstraints({ advanced: [{ torch: next }] })
       .then(() => setFlashOn(next))
-      .catch(() => setFlashOn(next));
-    if (!track) setFlashOn(next);
+      .catch(() => setFlashOn(false));
   };
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -153,9 +157,10 @@ export function CameraScreen({
           </button>
 
           <button
-            className={`btn-circle ${flashOn ? 'btn-circle-flash' : ''}`}
+            className={`btn-circle ${flashOn ? 'btn-circle-flash' : ''} ${flashSupported === false ? 'btn-disabled' : ''}`}
             onClick={toggleFlash}
-            title="Flash"
+            disabled={flashSupported === false}
+            title={flashSupported === false ? 'Flash not available on this device' : 'Flash'}
           >
             {flashOn ? '⚡' : '🔦'}
           </button>

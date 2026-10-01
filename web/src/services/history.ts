@@ -50,7 +50,11 @@ export const HistoryService = {
   },
 
   clearAll(): void {
-    localStorage.removeItem(STORAGE_KEY);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Storage unavailable (private mode) — nothing to clear
+    }
   },
 
   formatTimestamp(ts: number): string {
