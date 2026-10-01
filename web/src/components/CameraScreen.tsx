@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Language } from '../services/languages';
 import { LanguageSelector } from './LanguageSelector';
 import { VoiceSettings } from './VoiceSettings';
@@ -29,9 +29,81 @@ export function CameraScreen({
   ttsReady,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
   const [showLang, setShowLang] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [flashOn, setFlashOn] = useState(false);
+  const [camError, setCamError] = useState<string | null>(null);
+
+  // Live camera viewfinder (getUserMedia). Falls back to upload when the
+  // camera is unavailable or permission is denied.
+  useEffect(() => {
+    let cancelled = false;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCamError('Camera needs HTTPS — use the gallery button to upload');
+      return;
+    }
+    navigator.mediaDevices
+      .getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      .then((stream) => {
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+        const v = videoRef.current;
+        if (v) {
+          v.srcObject = stream;
+          v.onloadedmetadata = () => v.play().catch(() => {});
+        }
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setCamError(
+          err?.name === 'NotAllowedError'
+            ? 'Camera permission denied — allow it in browser settings, or use gallery'
+            : 'Camera unavailable — use the gallery button to upload a photo'
+        );
+      });
+    return () => {
+      cancelled = true;
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    };
+  }, []);
+
+  const captureFrame = () => {
+    const v = videoRef.current;
+    if (!v || !v.videoWidth) {
+      // Camera not delivering frames — fall back to the file picker
+      fileInputRef.current?.click();
+      return;
+    }
+    const c = document.createElement('canvas');
+    c.width = v.videoWidth;
+    c.height = v.videoHeight;
+    c.getContext('2d')!.drawImage(v, 0, 0);
+    c.toBlob(
+      (blob) => {
+        if (blob) onCapture(new File([blob], 'capture.jpg', { type: 'image/jpeg' }));
+        else fileInputRef.current?.click();
+      },
+      'image/jpeg',
+      0.92
+    );
+  };
+
+  const toggleFlash = () => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    const next = !flashOn;
+    // Real torch where supported; otherwise keep the visual toggle only
+    (track as any)
+      ?.applyConstraints?.({ advanced: [{ torch: next }] })
+      .then(() => setFlashOn(next))
+      .catch(() => setFlashOn(next));
+    if (!track) setFlashOn(next);
+  };
 
   const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -42,9 +114,18 @@ export function CameraScreen({
 
   return (
     <div className="screen camera-screen">
+      {/* Live viewfinder behind controls */}
+      <video
+        ref={videoRef}
+        className="camera-video"
+        autoPlay
+        muted
+        playsInline
+      />
+
       {/* Top hint */}
       <div className="camera-hint">
-        📷 Point camera at text — or upload an image
+        {camError ?? '📷 Point camera at text — or upload an image'}
       </div>
 
       {/* History button */}
@@ -52,22 +133,13 @@ export function CameraScreen({
         🕐
       </button>
 
-      {/* Upload area */}
-      <div className="upload-area">
-        <div className="upload-icon">📄</div>
-        <p className="upload-text">
-          Tap the green button to capture with your camera,<br />
-          or upload an image file
-        </p>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          capture="environment"
-          onChange={handleFile}
-          style={{ display: 'none' }}
-        />
-      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleFile}
+        style={{ display: 'none' }}
+      />
 
       {/* Bottom controls */}
       <div className="camera-controls">
@@ -82,10 +154,18 @@ export function CameraScreen({
 
           <button
             className={`btn-circle ${flashOn ? 'btn-circle-flash' : ''}`}
-            onClick={() => setFlashOn(!flashOn)}
-            title="Flash (visual only on web)"
+            onClick={toggleFlash}
+            title="Flash"
           >
             {flashOn ? '⚡' : '🔦'}
+          </button>
+
+          <button
+            className="btn-circle"
+            onClick={() => fileInputRef.current?.click()}
+            title="Upload from gallery"
+          >
+            🖼️
           </button>
 
           <button
@@ -97,15 +177,12 @@ export function CameraScreen({
           </button>
         </div>
 
-        <button
-          className={`btn-capture ${!ttsReady ? 'btn-disabled' : ''}`}
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!ttsReady}
-        >
+        <button className="btn-capture" onClick={captureFrame} title="Capture">
           <div className="btn-capture-inner" />
         </button>
 
-        {!ttsReady && <p className="tts-waiting">Initializing voice…</p>}
+        {!ttsReady && <p className="tts-waiting">Voice not ready — capture still works</p>}
+        {camError && <p className="tts-waiting">Camera off — tap 🖼️ to upload</p>}
       </div>
 
       {showLang && (

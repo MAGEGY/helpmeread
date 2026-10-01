@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import './App.css';
 import { CameraScreen } from './components/CameraScreen';
+import { CropScreen, type CropRect } from './components/CropScreen';
 import { HistoryScreen } from './components/HistoryScreen';
 import { ResultScreen } from './components/ResultScreen';
 import { SplashScreen } from './components/SplashScreen';
@@ -8,9 +9,35 @@ import { HistoryService } from './services/history';
 import { DEFAULT_LANGUAGE, type Language } from './services/languages';
 import { recognizeText, type OcrBlock } from './services/ocr';
 import { detectLanguage, translateText } from './services/translation';
-import { TtsService } from './services/tts';
+import { TtsService, cleanForSpeech, splitSentences } from './services/tts';
 
-type Screen = 'splash' | 'camera' | 'processing' | 'result' | 'error' | 'history';
+type Screen = 'splash' | 'camera' | 'crop' | 'processing' | 'result' | 'error' | 'history';
+
+const MAX_OCR_DIM = 1600;
+
+// Decode a File to an ImageBitmap (EXIF orientation applied) or fall back to
+// an <img> element for older browsers / formats createImageBitmap rejects.
+async function decodeImage(
+  file: File
+): Promise<{ source: CanvasImageSource; w: number; h: number }> {
+  try {
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    return { source: bmp, w: bmp.width, h: bmp.height };
+  } catch {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('Unsupported image format'));
+        el.src = url;
+      });
+      return { source: img, w: img.naturalWidth, h: img.naturalHeight };
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+}
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('splash');
@@ -27,6 +54,7 @@ export default function App() {
   const [imgH, setImgH] = useState(0);
   const [speakingIdx, setSpeakingIdx] = useState<number | null>(null);
   const speakAllCancel = useRef(false);
+  const [pendingCanvas, setPendingCanvas] = useState<HTMLCanvasElement | null>(null);
   // Splash → camera after 2s
   useEffect(() => {
     const t = setTimeout(() => setScreen('camera'), 2000);
@@ -38,16 +66,19 @@ export default function App() {
     setTtsReady(TtsService.isAvailable());
   }, []);
 
-  // Speak text (translating into the selected language when the detected
-  // source language differs)
-  const speak = async (text: string, onDone?: () => void) => {
-    if (!text) return;
-    let toSpeak = text;
-    const sourceLang = detectLanguage(text);
+  // Clean OCR text and translate into the selected language when needed.
+  const prepareSpeech = async (text: string): Promise<string> => {
+    const cleaned = cleanForSpeech(text);
+    if (!cleaned) return '';
+    const sourceLang = detectLanguage(cleaned);
     if (sourceLang !== selectedLang.code) {
-      const result = await translateText(text, sourceLang, selectedLang.code);
-      if (result.translatedText) toSpeak = result.translatedText;
+      const result = await translateText(cleaned, sourceLang, selectedLang.code);
+      if (result.translatedText) return result.translatedText;
     }
+    return cleaned;
+  };
+
+  const speakPrepared = (toSpeak: string, onDone?: () => void) => {
     TtsService.speak(toSpeak, selectedLang, {
       volume,
       rate: speechRate,
@@ -62,6 +93,20 @@ export default function App() {
     });
   };
 
+  const speakOnce = (toSpeak: string): Promise<void> =>
+    new Promise((res) => speakPrepared(toSpeak, res));
+
+  // Speak text (translating into the selected language when the detected
+  // source language differs)
+  const speak = async (text: string, onDone?: () => void) => {
+    const toSpeak = await prepareSpeech(text);
+    if (!toSpeak) {
+      onDone?.();
+      return;
+    }
+    speakPrepared(toSpeak, onDone);
+  };
+
   const handleSpeak = (text: string) => {
     // Tapping a block interrupts any auto-read in progress
     speakAllCancel.current = true;
@@ -70,19 +115,23 @@ export default function App() {
 
   const handleSpeakAll = (blocks: OcrBlock[], onDone: () => void) => {
     speakAllCancel.current = false;
-    setSpeakingIdx(0);
-    const readNext = async (i: number) => {
-      if (speakAllCancel.current || i >= blocks.length) {
-        setSpeakingIdx(null);
-        onDone();
-        return;
+    const run = async () => {
+      for (let i = 0; i < blocks.length; i++) {
+        if (speakAllCancel.current) break;
+        // Clean + translate once per block, then read sentence by sentence
+        // for a natural rhythm (blocks often end mid-sentence).
+        const prepared = await prepareSpeech(blocks[i].text);
+        if (!prepared) continue;
+        for (const sentence of splitSentences(prepared, selectedLang.code)) {
+          if (speakAllCancel.current) break;
+          setSpeakingIdx(i);
+          await speakOnce(sentence);
+        }
       }
-      setSpeakingIdx(i);
-      speak(blocks[i].text, () => {
-        setTimeout(() => readNext(i + 1), 300);
-      });
+      setSpeakingIdx(null);
+      onDone();
     };
-    readNext(0);
+    run();
   };
 
   const handleStop = () => {
@@ -93,37 +142,68 @@ export default function App() {
 
   const handleCapture = async (file: File) => {
     setScreen('processing');
-    const url = URL.createObjectURL(file);
-    setImageUrl(url);
 
     try {
-      // Load image to get dimensions
-      const img = new Image();
-      img.src = url;
-      await new Promise((res) => (img.onload = res));
-      setImgW(img.naturalWidth);
-      setImgH(img.naturalHeight);
+      // Normalize through a canvas: applies EXIF rotation and downscales
+      // huge photos so Tesseract runs reliably. The same canvas is used for
+      // display + OCR, so bounding boxes always align.
+      const { source, w, h } = await decodeImage(file);
+      const scale = Math.min(1, MAX_OCR_DIM / Math.max(w, h));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      canvas.getContext('2d')!.drawImage(source, 0, 0, canvas.width, canvas.height);
 
-      const result = await recognizeText(img, selectedLang);
+      setPendingCanvas(canvas);
+      setImageUrl(canvas.toDataURL('image/jpeg', 0.92));
+      setImgW(canvas.width);
+      setImgH(canvas.height);
+      setScreen('crop');
+    } catch (e: any) {
+      setErrorMsg(e?.message ?? 'Failed to process image');
+      setScreen('error');
+    }
+  };
+
+  // Run OCR on a (possibly cropped) canvas and show results
+  const runOcr = async (canvas: HTMLCanvasElement) => {
+    setScreen('processing');
+    try {
+      setImageUrl(canvas.toDataURL('image/jpeg', 0.92));
+      setImgW(canvas.width);
+      setImgH(canvas.height);
+
+      const result = await recognizeText(canvas, selectedLang);
       setOcrBlocks(result.blocks);
-      if (result.width && result.height) {
-        setImgW(result.width);
-        setImgH(result.height);
-      }
 
-      // Announce results
       const count = result.blocks.length;
-      if (count > 0) {
-        speak(`Found ${count} text ${count === 1 ? 'area' : 'areas'}`);
-      } else {
-        speak('No text found');
-      }
+      speak(
+        count > 0
+          ? `Found ${count} text ${count === 1 ? 'area' : 'areas'}`
+          : 'No text found'
+      );
 
       setScreen('result');
     } catch (e: any) {
       setErrorMsg(e?.message ?? 'Failed to process image');
       setScreen('error');
     }
+  };
+
+  const handleCrop = (rect: CropRect | null) => {
+    const src = pendingCanvas;
+    if (!src) return;
+    if (!rect) {
+      runOcr(src); // whole image
+      return;
+    }
+    const w = Math.max(1, Math.min(rect.x1, src.width) - Math.max(0, rect.x0));
+    const h = Math.max(1, Math.min(rect.y1, src.height) - Math.max(0, rect.y0));
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    c.getContext('2d')!.drawImage(src, rect.x0, rect.y0, w, h, 0, 0, w, h);
+    runOcr(c);
   };
 
   const handleSave = (text: string, blockCount: number) => {
@@ -144,7 +224,7 @@ export default function App() {
   const handleBack = () => {
     handleStop();
     setOcrBlocks([]);
-    if (imageUrl) URL.revokeObjectURL(imageUrl);
+    setPendingCanvas(null);
     setImageUrl('');
     setScreen('camera');
   };
@@ -159,6 +239,17 @@ export default function App() {
         <p className="error-msg">{errorMsg}</p>
         <button className="btn-retry" onClick={handleBack}>Try Again</button>
       </div>
+    );
+  }
+
+  if (screen === 'crop') {
+    return (
+      <CropScreen
+        imageUrl={imageUrl}
+        imageWidth={imgW}
+        onCrop={handleCrop}
+        onBack={handleBack}
+      />
     );
   }
 

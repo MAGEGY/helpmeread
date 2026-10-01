@@ -74,6 +74,7 @@ export async function translateText(
 
     // MyMemory sometimes returns a terminology marker "[...]" for short text
     let translated = data.responseData?.translatedText ?? '';
+
     if (translated.trim().startsWith('[')) {
       const matches = data.matches ?? [];
       for (const m of matches) {
@@ -84,6 +85,17 @@ export async function translateText(
         }
       }
     }
+
+    // Quota/warning strings can arrive with a 200 status — never speak them
+    if (/MYMEMORY|QUERY LENGTH LIMIT|INVALID/i.test(translated)) {
+      return { translatedText: '', error: 'Translation unavailable' };
+    }
+
+    // MyMemory returns HTML entities (&quot; &#39; &amp;) which would be
+    // spoken literally — decode them
+    const ta = document.createElement('textarea');
+    ta.innerHTML = translated;
+    translated = ta.value;
 
     return { translatedText: translated.trim() };
   } catch (e: any) {

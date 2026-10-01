@@ -23,6 +23,57 @@ function loadVoices(): Promise<SpeechSynthesisVoice[]> {
 
 let voicesReady = loadVoices();
 
+/** Remove OCR/symbol noise so the voice reads like a human — keeps letters,
+ * digits, currency, apostrophes and normal sentence punctuation. */
+export function cleanForSpeech(text: string): string {
+  return text
+    // decorative symbols / OCR junk (bullets, arrows, shapes, stray quotes)
+    .replace(/[•·‣◦▪▫●○■□▲△►◄▼▽♦◆★☆✓✔✗✘→←↑↓↔↕«»‹›„“”‘’"~^_|\\<>{}[\]©®™°§¶†‡]/g, ' ')
+    // runs of punctuation (OCR noise like "..." "---" "؟؟؟")
+    .replace(/[.,;:!?؟…\-–—]{2,}/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Split into sentences for natural reading rhythm. Uses Intl.Segmenter
+ * where available, with a punctuation fallback. */
+export function splitSentences(text: string, lang: string): string[] {
+  if (typeof (Intl as any).Segmenter === 'function') {
+    const seg = new Intl.Segmenter(lang, { granularity: 'sentence' });
+    return Array.from(seg.segment(text))
+      .map((s) => s.segment.trim())
+      .filter(Boolean);
+  }
+  return (
+    text
+      .match(/[^.!?؟…]+[.!?؟…]*/g)
+      ?.map((s) => s.trim())
+      .filter(Boolean) ?? [text]
+  );
+}
+
+/** Pick the most natural-sounding voice for the language. Cloud/neural
+ * voices (Google on Android, "Natural" on Edge) sound far less robotic. */
+function pickVoice(language: Language): SpeechSynthesisVoice | null {
+  const norm = (l: string) => l.replace('_', '-').toLowerCase();
+  const candidates = voices.filter((v) => {
+    const l = norm(v.lang);
+    return l === norm(language.ttsLocale) || l.startsWith(language.code);
+  });
+  if (!candidates.length) return null;
+  const score = (v: SpeechSynthesisVoice): number => {
+    const n = v.name.toLowerCase();
+    let s = 0;
+    if (/(natural|neural|online)/.test(n)) s += 6;   // Edge neural voices
+    if (/google/.test(n)) s += 5;                    // Chrome/Android voices
+    if (!v.localService) s += 3;                     // cloud-backed = better
+    if (/(compact|espeak|basic)/.test(n)) s -= 6;    // robotic fallbacks
+    if (norm(v.lang) === norm(language.ttsLocale)) s += 2;
+    return s;
+  };
+  return candidates.reduce((a, b) => (score(b) > score(a) ? b : a));
+}
+
 export interface TtsOptions {
   volume?: number;   // 0..1
   rate?: number;     // 0.5..2
@@ -52,10 +103,8 @@ export const TtsService = {
     utterance.rate = opts.rate ?? 1;
     utterance.pitch = 1;
 
-    // Try to find a matching voice
-    const matchingVoice = voices.find(
-      (v) => v.lang === language.ttsLocale || v.lang.startsWith(language.code)
-    );
+    // Try to find the most natural matching voice
+    const matchingVoice = pickVoice(language);
     if (matchingVoice) {
       utterance.voice = matchingVoice;
     }

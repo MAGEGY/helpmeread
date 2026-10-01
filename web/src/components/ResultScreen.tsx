@@ -52,6 +52,7 @@ export function ResultScreen({
   const [showSettings, setShowSettings] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [showText, setShowText] = useState(false);
   const [displaySize, setDisplaySize] = useState<{ w: number; h: number } | null>(null);
   const voiceCmdRef = useRef(new VoiceCommandService());
   const imgRef = useRef<HTMLImageElement>(null);
@@ -152,6 +153,13 @@ export function ResultScreen({
         >
           {isListening ? '🔴' : '🎤'}
         </button>
+        <button
+          className={`btn-icon ${showText ? 'btn-icon-active' : ''}`}
+          onClick={() => setShowText(!showText)}
+          title="Show text"
+        >
+          📝
+        </button>
         <button className="btn-icon" onClick={() => setShowSettings(true)} title="Settings">⚙️</button>
       </div>
 
@@ -159,6 +167,34 @@ export function ResultScreen({
       {isListening && (
         <div className="voice-hint">
           🎙️ Listening… Say: Read, Stop, Save, Camera, History
+        </div>
+      )}
+
+      {/* Extracted text panel — shows exactly what was read; tap a line to hear it */}
+      {showText && (
+        <div className="text-panel">
+          <div className="text-panel-head">
+            <span>Extracted text</span>
+            <button className="btn-icon" onClick={() => setShowText(false)} title="Close">✕</button>
+          </div>
+          <div className="text-panel-body">
+            {blocks.length === 0 ? (
+              <p className="text-panel-empty">No text extracted</p>
+            ) : (
+              blocks.map((b, i) => (
+                <p
+                  key={i}
+                  className={`text-line ${speakingIdx === i ? 'text-line-speaking' : ''}`}
+                  onClick={() => {
+                    setSelectedIdx(i);
+                    onSpeak(b.text);
+                  }}
+                >
+                  {b.text}
+                </p>
+              ))
+            )}
+          </div>
         </div>
       )}
 
